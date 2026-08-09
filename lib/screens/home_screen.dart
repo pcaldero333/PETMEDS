@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import 'patients_screen.dart';
 import 'medicines_screen.dart';
+import 'treatments_screen.dart';
 
 class HomeScreen extends StatelessWidget {
   const HomeScreen({super.key});
@@ -107,15 +108,20 @@ class HomeScreen extends StatelessWidget {
 
                   // TRATAMIENTOS
                   SizedBox(
+                    width: double.infinity,
                     height: 50,
                     child: ElevatedButton(
                       onPressed: () {
-                        // Próximamente
+                        Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                            builder: (context) => const TreatmentsScreen(),
+                          ),
+                        );
                       },
                       child: const Text("Treatments"),
                     ),
                   ),
-
                   const SizedBox(height: 20),
                 ],
               ),

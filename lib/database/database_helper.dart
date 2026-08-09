@@ -18,105 +18,100 @@ class DatabaseHelper {
 
   Future<Database> _initDB(String filePath) async {
     final dbPath = await getDatabasesPath();
-
     final path = join(dbPath, filePath);
 
-    return await openDatabase(
-      path,
-      version: 3,
-      onCreate: _createDB,
-      onUpgrade: (db, oldVersion, newVersion) async {
-        await db.execute('DROP TABLE IF EXISTS patients');
-        await db.execute('DROP TABLE IF EXISTS medicines');
-        await db.execute('DROP TABLE IF EXISTS treatments');
-        await db.execute('DROP TABLE IF EXISTS dose_history');
-
-        await _createDB(db, newVersion);
-      },
-    );
+    return await openDatabase(path, version: 4, onCreate: _createDB);
   }
 
-  Future _createDB(Database db, int version) async {
-    await db.execute('''
-CREATE TABLE patients(
+  // ============================================================
+  // CREACIÓN DE LA BASE DE DATOS
+  // ============================================================
 
-id INTEGER PRIMARY KEY AUTOINCREMENT,
-
-name TEXT NOT NULL,
-
-species TEXT NOT NULL,
-
-breed TEXT,
-
-sex TEXT,
-
-birthDate TEXT,
-
-weight REAL,
-
-ownerName TEXT NOT NULL,
-
-ownerPhone TEXT,
-
-notes TEXT,
-
-photoPath TEXT
-
-);
-''');
+  Future<void> _createDB(Database db, int version) async {
+    // ==========================================================
+    // MASCOTAS
+    // ==========================================================
 
     await db.execute('''
-CREATE TABLE medicines(
+      CREATE TABLE patients(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        species TEXT NOT NULL,
+        breed TEXT,
+        sex TEXT,
+        birthDate TEXT,
+        weight REAL,
+        ownerName TEXT NOT NULL,
+        ownerPhone TEXT,
+        notes TEXT,
+        photoPath TEXT
+      )
+    ''');
 
-id INTEGER PRIMARY KEY AUTOINCREMENT,
-
-name TEXT NOT NULL,
-
-presentation TEXT,
-
-concentration TEXT,
-
-observations TEXT
-
-)
-''');
-
-    await db.execute('''
-CREATE TABLE treatments(
-
-id INTEGER PRIMARY KEY AUTOINCREMENT,
-
-patientId INTEGER,
-
-medicineId INTEGER,
-
-startDate TEXT,
-
-frequencyHours INTEGER,
-
-totalDoses INTEGER,
-
-remainingDoses INTEGER,
-
-active INTEGER
-
-)
-''');
+    // ==========================================================
+    // MEDICAMENTOS
+    // ==========================================================
 
     await db.execute('''
-CREATE TABLE dose_history(
+      CREATE TABLE medicines(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        presentation TEXT,
+        concentration TEXT,
+        observations TEXT
+      )
+    ''');
 
-id INTEGER PRIMARY KEY AUTOINCREMENT,
+    // ==========================================================
+    // TRATAMIENTOS
+    // ==========================================================
 
-patientId INTEGER,
+    await db.execute('''
+      CREATE TABLE treatments(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        patientId INTEGER NOT NULL,
+        medicineId INTEGER NOT NULL,
+        startDate TEXT NOT NULL,
+        endDate TEXT NOT NULL,
+        frequencyHours INTEGER NOT NULL,
+        doseAmount REAL NOT NULL,
+        doseUnit TEXT NOT NULL,
+        totalDoses INTEGER NOT NULL,
+        active INTEGER NOT NULL DEFAULT 1
+      )
+    ''');
 
-treatmentId INTEGER,
+    // ==========================================================
+    // HISTORIAL DE DOSIS
+    // ==========================================================
 
-doseDate TEXT,
+    await db.execute('''
+      CREATE TABLE dose_history(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        patientId INTEGER NOT NULL,
+        treatmentId INTEGER NOT NULL,
+        scheduledDateTime TEXT NOT NULL,
+        administeredDateTime TEXT,
+        status TEXT NOT NULL
+      )
+    ''');
 
-status TEXT
+    // ==========================================================
+    // PARÁMETROS DEL SISTEMA
+    // ==========================================================
 
-)
-''');
+    await db.execute('''
+      CREATE TABLE parameters(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL UNIQUE,
+        value TEXT NOT NULL
+      )
+    ''');
+
+    // ==========================================================
+    // PARÁMETROS INICIALES
+    // ==========================================================
+
+    await db.insert('parameters', {'name': 'postponeMinutes', 'value': '15'});
   }
 }
