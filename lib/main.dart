@@ -1,7 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:petmeds/screens/home_screen.dart';
+import 'package:petmeds/services/alarm_bootstrap_service.dart';
 
-void main() {
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+
+  await AlarmBootstrapService.instance.initialize();
+
   runApp(const MyApp());
 }
 

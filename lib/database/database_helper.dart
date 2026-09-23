@@ -12,7 +12,6 @@ class DatabaseHelper {
     if (_database != null) return _database!;
 
     _database = await _initDB('petmeds.db');
-
     return _database!;
   }
 
@@ -20,18 +19,15 @@ class DatabaseHelper {
     final dbPath = await getDatabasesPath();
     final path = join(dbPath, filePath);
 
-    return await openDatabase(path, version: 4, onCreate: _createDB);
+    return openDatabase(
+      path,
+      version: 7,
+      onCreate: _createDB,
+      onUpgrade: _onUpgrade,
+    );
   }
 
-  // ============================================================
-  // CREACIÓN DE LA BASE DE DATOS
-  // ============================================================
-
   Future<void> _createDB(Database db, int version) async {
-    // ==========================================================
-    // MASCOTAS
-    // ==========================================================
-
     await db.execute('''
       CREATE TABLE patients(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -48,10 +44,6 @@ class DatabaseHelper {
       )
     ''');
 
-    // ==========================================================
-    // MEDICAMENTOS
-    // ==========================================================
-
     await db.execute('''
       CREATE TABLE medicines(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -61,10 +53,6 @@ class DatabaseHelper {
         observations TEXT
       )
     ''');
-
-    // ==========================================================
-    // TRATAMIENTOS
-    // ==========================================================
 
     await db.execute('''
       CREATE TABLE treatments(
@@ -81,10 +69,6 @@ class DatabaseHelper {
       )
     ''');
 
-    // ==========================================================
-    // HISTORIAL DE DOSIS
-    // ==========================================================
-
     await db.execute('''
       CREATE TABLE dose_history(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -96,9 +80,16 @@ class DatabaseHelper {
       )
     ''');
 
-    // ==========================================================
-    // PARÁMETROS DEL SISTEMA
-    // ==========================================================
+    await db.execute('''
+      CREATE TABLE pending_doses(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        treatmentId INTEGER NOT NULL UNIQUE,
+        patientId INTEGER NOT NULL,
+        scheduledDateTime TEXT NOT NULL,
+        alarmDateTime TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'PENDING'
+      )
+    ''');
 
     await db.execute('''
       CREATE TABLE parameters(
@@ -108,10 +99,25 @@ class DatabaseHelper {
       )
     ''');
 
-    // ==========================================================
-    // PARÁMETROS INICIALES
-    // ==========================================================
-
     await db.insert('parameters', {'name': 'postponeMinutes', 'value': '15'});
+  }
+
+  Future<void> _onUpgrade(Database db, int oldVersion, int newVersion) async {
+    if (oldVersion < 5) {
+      await db.execute('''
+        CREATE TABLE pending_doses(
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          treatmentId INTEGER NOT NULL UNIQUE,
+          patientId INTEGER NOT NULL,
+          scheduledDateTime TEXT NOT NULL,
+          alarmDateTime TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'PENDING'
+        )
+      ''');
+    }
+
+    // Versión 7:
+    // La aplicación deja de crear dosis futuras o alarmas programadas.
+    // No se borra ningún dato existente durante esta migración.
   }
 }

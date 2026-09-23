@@ -8,6 +8,8 @@ import '../services/treatment_service.dart';
 import '../services/patient_service.dart';
 import '../services/medicine_service.dart';
 import 'treatment_form_screen.dart';
+import '../services/pending_dose_service.dart';
+import '../models/pending_dose.dart';
 
 class TreatmentsScreen extends StatefulWidget {
   const TreatmentsScreen({super.key});
@@ -20,7 +22,9 @@ class _TreatmentsScreenState extends State<TreatmentsScreen> {
   final TreatmentService _treatmentService = TreatmentService();
   final PatientService _patientService = PatientService();
   final MedicineService _medicineService = MedicineService();
+  final PendingDoseService _pendingDoseService = PendingDoseService();
 
+  List<PendingDose> pendingDoses = [];
   List<Treatment> treatments = [];
   List<Patient> patients = [];
   List<Medicine> medicines = [];
@@ -45,6 +49,7 @@ class _TreatmentsScreenState extends State<TreatmentsScreen> {
     final treatmentData = await _treatmentService.getTreatments();
     final patientData = await _patientService.getPatients();
     final medicineData = await _medicineService.getMedicines();
+    final pendingDoseData = await _pendingDoseService.getPendingDoses();
 
     if (!mounted) return;
 
@@ -52,10 +57,10 @@ class _TreatmentsScreenState extends State<TreatmentsScreen> {
       treatments = treatmentData;
       patients = patientData;
       medicines = medicineData;
+      pendingDoses = pendingDoseData;
       loading = false;
     });
   }
-
   // ============================================================
   // BUSCAR MASCOTA
   // ============================================================
@@ -85,6 +90,18 @@ class _TreatmentsScreenState extends State<TreatmentsScreen> {
   }
 
   // ============================================================
+  // BUSCAR PRÓXIMA DOSIS PENDIENTE
+  // ============================================================
+
+  PendingDose? getPendingDoseForTreatment(int treatmentId) {
+    try {
+      return pendingDoses.firstWhere((dose) => dose.treatmentId == treatmentId);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  // ============================================================
   // FORMATEAR FECHA
   // ============================================================
 
@@ -94,6 +111,13 @@ class _TreatmentsScreenState extends State<TreatmentsScreen> {
         "${date.year}";
   }
 
+  String formatDateTime(DateTime dateTime) {
+    return "${dateTime.day.toString().padLeft(2, '0')}/"
+        "${dateTime.month.toString().padLeft(2, '0')}/"
+        "${dateTime.year} "
+        "${dateTime.hour.toString().padLeft(2, '0')}:"
+        "${dateTime.minute.toString().padLeft(2, '0')}";
+  }
   // ============================================================
   // TEXTO DE FRECUENCIA
   // ============================================================
@@ -168,6 +192,7 @@ class _TreatmentsScreenState extends State<TreatmentsScreen> {
   Widget treatmentCard(Treatment treatment) {
     final patientName = getPatientName(treatment.patientId);
     final medicineName = getMedicineName(treatment.medicineId);
+    final pendingDose = getPendingDoseForTreatment(treatment.id!);
 
     return Card(
       margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
@@ -224,22 +249,88 @@ class _TreatmentsScreenState extends State<TreatmentsScreen> {
             // ----------------------------------------------------
             // FECHAS
             // ----------------------------------------------------
+            // ----------------------------------------------------
+            // INICIO
+            // ----------------------------------------------------
             Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                const Icon(Icons.calendar_today, size: 20),
+                const Icon(Icons.play_circle_outline, size: 20),
 
                 const SizedBox(width: 10),
 
                 Expanded(
-                  child: Text(
-                    "${formatDate(treatment.startDate)}"
-                    " → "
-                    "${formatDate(treatment.endDate)}",
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        "Inicio",
+                        style: TextStyle(fontWeight: FontWeight.bold),
+                      ),
+                      Text(formatDateTime(treatment.startDate)),
+                    ],
                   ),
                 ),
               ],
             ),
 
+            const SizedBox(height: 10),
+
+            // ----------------------------------------------------
+            // FINALIZACIÓN
+            // ----------------------------------------------------
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Icon(Icons.stop_circle_outlined, size: 20),
+
+                const SizedBox(width: 10),
+
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        "Finalización",
+                        style: TextStyle(fontWeight: FontWeight.bold),
+                      ),
+                      Text(formatDateTime(treatment.endDate)),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+
+            const SizedBox(height: 10),
+
+            // ----------------------------------------------------
+            // PRÓXIMA ALARMA
+            // ----------------------------------------------------
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Icon(Icons.alarm, size: 20),
+
+                const SizedBox(width: 10),
+
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        "Próxima alarma",
+                        style: TextStyle(fontWeight: FontWeight.bold),
+                      ),
+                      Text(
+                        pendingDose != null
+                            ? formatDateTime(pendingDose.alarmDateTime)
+                            : "No hay dosis pendiente",
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
             const SizedBox(height: 12),
 
             // ----------------------------------------------------
