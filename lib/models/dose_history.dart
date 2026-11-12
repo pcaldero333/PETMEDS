@@ -9,6 +9,13 @@ class DoseHistory {
 
   String status;
 
+  // Datos obtenidos mediante JOIN
+  String? patientName;
+  String? medicineName;
+
+  double? doseAmount;
+  String? doseUnit;
+
   DoseHistory({
     this.id,
     required this.patientId,
@@ -16,6 +23,10 @@ class DoseHistory {
     required this.scheduledDateTime,
     this.administeredDateTime,
     required this.status,
+    this.patientName,
+    this.medicineName,
+    this.doseAmount,
+    this.doseUnit,
   });
 
   // ============================================================
@@ -47,6 +58,14 @@ class DoseHistory {
           ? DateTime.parse(map['administeredDateTime'])
           : null,
       status: map['status'] ?? 'UNKNOWN',
+
+      // Campos opcionales provenientes de JOIN
+      patientName: map['patientName'],
+      medicineName: map['medicineName'],
+      doseAmount: map['doseAmount'] != null
+          ? (map['doseAmount'] as num).toDouble()
+          : null,
+      doseUnit: map['doseUnit'],
     );
   }
 }

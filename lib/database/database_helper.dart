@@ -12,6 +12,7 @@ class DatabaseHelper {
     if (_database != null) return _database!;
 
     _database = await _initDB('petmeds.db');
+
     return _database!;
   }
 
@@ -21,7 +22,7 @@ class DatabaseHelper {
 
     return openDatabase(
       path,
-      version: 7,
+      version: 8,
       onCreate: _createDB,
       onUpgrade: _onUpgrade,
     );
@@ -99,10 +100,28 @@ class DatabaseHelper {
       )
     ''');
 
-    await db.insert('parameters', {'name': 'postponeMinutes', 'value': '15'});
+    await db.insert(
+      'parameters',
+      {
+        'name': 'postponeMinutes',
+        'value': '15',
+      },
+    );
+
+    await db.insert(
+      'parameters',
+      {
+        'name': 'notificationsEnabled',
+        'value': '1',
+      },
+    );
   }
 
-  Future<void> _onUpgrade(Database db, int oldVersion, int newVersion) async {
+  Future<void> _onUpgrade(
+    Database db,
+    int oldVersion,
+    int newVersion,
+  ) async {
     if (oldVersion < 5) {
       await db.execute('''
         CREATE TABLE pending_doses(
@@ -119,5 +138,27 @@ class DatabaseHelper {
     // Versión 7:
     // La aplicación deja de crear dosis futuras o alarmas programadas.
     // No se borra ningún dato existente durante esta migración.
+
+    // Versión 8:
+    // Se agregan los parámetros de configuración de notificaciones.
+    if (oldVersion < 8) {
+      await db.insert(
+        'parameters',
+        {
+          'name': 'postponeMinutes',
+          'value': '15',
+        },
+        conflictAlgorithm: ConflictAlgorithm.ignore,
+      );
+
+      await db.insert(
+        'parameters',
+        {
+          'name': 'notificationsEnabled',
+          'value': '1',
+        },
+        conflictAlgorithm: ConflictAlgorithm.ignore,
+      );
+    }
   }
 }

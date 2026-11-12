@@ -7,6 +7,7 @@ import 'patients_screen.dart';
 import 'medicines_screen.dart';
 import 'treatments_screen.dart';
 import 'settings_screen.dart';
+import 'treatment_history_screen.dart';
 
 class HomeScreen extends StatelessWidget {
   const HomeScreen({super.key});
@@ -205,31 +206,79 @@ class HomeScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final screenHeight = MediaQuery.of(context).size.height;
+    const azul = Color(0xFF163B52);
+    const verde = Color(0xFF287C68);
+    const fondo = Color(0xFFF3F7F5);
 
     final screenWidth = MediaQuery.of(context).size.width;
+    final logoSize = screenWidth > 600 ? 170.0 : 125.0;
+    final columns = screenWidth > 600 ? 4 : 2;
 
-    // Tamaño adaptable del logo.
-    final double logoSize = screenHeight < 500
-        ? screenHeight * 0.35
-        : screenWidth > 600
-        ? 300
-        : 360;
+    Widget actionCard({
+      required String title,
+      required String subtitle,
+      required IconData icon,
+      required VoidCallback onTap,
+    }) {
+      return Card(
+        clipBehavior: Clip.antiAlias,
+        elevation: 2,
+        color: Colors.white,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+        child: InkWell(
+          onTap: onTap,
+          child: Padding(
+            padding: const EdgeInsets.all(14),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Container(
+                  width: 46,
+                  height: 46,
+                  decoration: BoxDecoration(
+                    color: verde.withValues(alpha: 0.12),
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                  child: Icon(icon, color: verde, size: 27),
+                ),
+                const SizedBox(height: 12),
+                Text(
+                  title,
+                  style: const TextStyle(
+                    color: azul,
+                    fontSize: 15,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  subtitle,
+                  style: TextStyle(
+                    color: Colors.blueGrey.shade600,
+                    fontSize: 12,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
 
     return Scaffold(
-      // ==========================================================
-      // APP BAR
-      // ==========================================================
+      backgroundColor: fondo,
       appBar: AppBar(
-        centerTitle: true,
-        title: const Text("PETMEDS"),
-
-        // --------------------------------------------------------
-        // BOTÓN CONFIGURACIÓN
-        // --------------------------------------------------------
+        backgroundColor: azul,
+        foregroundColor: Colors.white,
+        centerTitle: false,
+        title: const Text(
+          'PETMEDS',
+          style: TextStyle(fontWeight: FontWeight.bold, letterSpacing: 1.2),
+        ),
         actions: [
           IconButton(
-            icon: const Icon(Icons.settings),
+            icon: const Icon(Icons.settings_outlined),
             tooltip: 'Configuración',
             onPressed: () {
               Navigator.push(
@@ -238,148 +287,216 @@ class HomeScreen extends StatelessWidget {
               );
             },
           ),
+          const SizedBox(width: 8),
         ],
       ),
-
-      // ==========================================================
-      // BODY
-      // ==========================================================
       body: SafeArea(
         child: SingleChildScrollView(
-          padding: const EdgeInsets.all(20),
-
+          padding: const EdgeInsets.fromLTRB(18, 12, 18, 28),
           child: Center(
             child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 600),
-
+              constraints: const BoxConstraints(maxWidth: 760),
               child: Column(
-                mainAxisAlignment: MainAxisAlignment.start,
-
                 crossAxisAlignment: CrossAxisAlignment.stretch,
-
                 children: [
+                  // IDENTIDAD VISUAL
+                  Card(
+                    elevation: 0,
+                    color: Colors.white,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(24),
+                    ),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                        vertical: 20,
+                        horizontal: 16,
+                      ),
+                      child: Column(
+                        children: [
+                          Image.asset(
+                            'assets/images/isologo_petmeds.png',
+                            width: logoSize,
+                            height: logoSize,
+                            fit: BoxFit.contain,
+                          ),
+                          const SizedBox(height: 8),
+                          const Text(
+                            'Cuidar también es recordar',
+                            textAlign: TextAlign.center,
+                            style: TextStyle(
+                              color: azul,
+                              fontSize: 17,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                          const SizedBox(height: 6),
+                          Text(
+                            'Control de medicamentos y tratamientos',
+                            textAlign: TextAlign.center,
+                            style: TextStyle(
+                              color: Colors.blueGrey.shade600,
+                              fontSize: 13,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+
+                  const SizedBox(height: 24),
+
+                  // DOSIS PENDIENTES
+                  const Text(
+                    'Seguimiento de medicamentos',
+                    style: TextStyle(
+                      color: azul,
+                      fontSize: 19,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
                   const SizedBox(height: 10),
 
-                  // ==================================================
-                  // LOGO
-                  // ==================================================
+                  Card(
+                    color: verde,
+                    elevation: 2,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(20),
+                    ),
+                    child: InkWell(
+                      borderRadius: BorderRadius.circular(20),
+                      onTap: () => _showPendingDose(context),
+                      child: const Padding(
+                        padding: EdgeInsets.all(20),
+                        child: Row(
+                          children: [
+                            Icon(
+                              Icons.notifications_active_outlined,
+                              color: Colors.white,
+                              size: 38,
+                            ),
+                            SizedBox(width: 16),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    'Ver dosis pendientes',
+                                    style: TextStyle(
+                                      color: Colors.white,
+                                      fontSize: 17,
+                                      fontWeight: FontWeight.bold,
+                                    ),
+                                  ),
+                                  SizedBox(height: 5),
+                                  Text(
+                                    'Consultar las dosis que requieren atención',
+                                    style: TextStyle(
+                                      color: Colors.white,
+                                      fontSize: 13,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            Icon(
+                              Icons.arrow_forward_ios,
+                              color: Colors.white,
+                              size: 18,
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+
+                  const SizedBox(height: 24),
+
+                  const Text(
+                    'Administración',
+                    style: TextStyle(
+                      color: azul,
+                      fontSize: 19,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+
+                  // ACCESOS PRINCIPALES
+                  GridView.count(
+                    crossAxisCount: columns,
+                    shrinkWrap: true,
+                    physics: const NeverScrollableScrollPhysics(),
+                    crossAxisSpacing: 12,
+                    mainAxisSpacing: 12,
+                    childAspectRatio: screenWidth > 600 ? 1.35 : 1.15,
+                    children: [
+                      actionCard(
+                        title: 'Mascotas',
+                        subtitle: 'Fichas y datos',
+                        icon: Icons.pets_outlined,
+                        onTap: () {
+                          Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                              builder: (context) => const PatientsScreen(),
+                            ),
+                          );
+                        },
+                      ),
+                      actionCard(
+                        title: 'Medicamentos',
+                        subtitle: 'Catálogo',
+                        icon: Icons.medication_outlined,
+                        onTap: () {
+                          Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                              builder: (context) => const MedicinesScreen(),
+                            ),
+                          );
+                        },
+                      ),
+                      actionCard(
+                        title: 'Tratamientos',
+                        subtitle: 'Pautas y horarios',
+                        icon: Icons.calendar_month_outlined,
+                        onTap: () {
+                          Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                              builder: (context) => const TreatmentsScreen(),
+                            ),
+                          );
+                        },
+                      ),
+                      actionCard(
+                        title: 'Historial',
+                        subtitle: 'Registro de dosis',
+                        icon: Icons.history_outlined,
+                        onTap: () {
+                          Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                              builder: (context) =>
+                                  const TreatmentHistoryScreen(),
+                            ),
+                          );
+                        },
+                      ),
+                    ],
+                  ),
+
+                  const SizedBox(height: 20),
+
                   Center(
-                    child: Image.asset(
-                      'assets/images/isologo_petmeds.png',
-                      width: logoSize,
-                      height: logoSize,
-                      fit: BoxFit.contain,
-                    ),
-                  ),
-
-                  const SizedBox(height: 15),
-
-                  // ==================================================
-                  // NOMBRE
-                  // ==================================================
-                  const Center(
                     child: Text(
-                      "PETMEDS",
+                      'PETMEDS · Cuidado y bienestar',
                       style: TextStyle(
-                        fontSize: 32,
-                        fontWeight: FontWeight.bold,
+                        color: Colors.blueGrey.shade500,
+                        fontSize: 12,
                       ),
                     ),
                   ),
-
-                  const SizedBox(height: 10),
-
-                  // ==================================================
-                  // SUBTÍTULO
-                  // ==================================================
-                  const Center(
-                    child: Text(
-                      "Medication Reminder",
-                      style: TextStyle(fontSize: 18, color: Colors.grey),
-                    ),
-                  ),
-
-                  const SizedBox(height: 35),
-
-                  // ==================================================
-                  // VER DOSIS PENDIENTES
-                  // ==================================================
-                  SizedBox(
-                    height: 55,
-                    child: ElevatedButton.icon(
-                      onPressed: () {
-                        _showPendingDose(context);
-                      },
-                      icon: const Icon(Icons.notifications_active),
-                      label: const Text(
-                        "VER DOSIS PENDIENTES",
-                        style: TextStyle(fontWeight: FontWeight.bold),
-                      ),
-                    ),
-                  ),
-
-                  const SizedBox(height: 20),
-
-                  // ==================================================
-                  // MASCOTAS
-                  // ==================================================
-                  SizedBox(
-                    height: 50,
-                    child: ElevatedButton(
-                      onPressed: () {
-                        Navigator.push(
-                          context,
-                          MaterialPageRoute(
-                            builder: (context) => const PatientsScreen(),
-                          ),
-                        );
-                      },
-                      child: const Text("Mascotas"),
-                    ),
-                  ),
-
-                  const SizedBox(height: 15),
-
-                  // ==================================================
-                  // MEDICAMENTOS
-                  // ==================================================
-                  SizedBox(
-                    height: 50,
-                    child: ElevatedButton(
-                      onPressed: () {
-                        Navigator.push(
-                          context,
-                          MaterialPageRoute(
-                            builder: (context) => const MedicinesScreen(),
-                          ),
-                        );
-                      },
-                      child: const Text("Medicines"),
-                    ),
-                  ),
-
-                  const SizedBox(height: 15),
-
-                  // ==================================================
-                  // TRATAMIENTOS
-                  // ==================================================
-                  SizedBox(
-                    width: double.infinity,
-                    height: 50,
-                    child: ElevatedButton(
-                      onPressed: () {
-                        Navigator.push(
-                          context,
-                          MaterialPageRoute(
-                            builder: (context) => const TreatmentsScreen(),
-                          ),
-                        );
-                      },
-                      child: const Text("Treatments"),
-                    ),
-                  ),
-
-                  const SizedBox(height: 20),
                 ],
               ),
             ),

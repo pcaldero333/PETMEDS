@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'alarm_service.dart';
 import 'pending_dose_service.dart';
+import 'parameter_service.dart';
 
 class AlarmBootstrapService {
   static final AlarmBootstrapService instance = AlarmBootstrapService._init();
@@ -11,13 +12,6 @@ class AlarmBootstrapService {
   final AlarmService _alarmService = AlarmService.instance;
 
   final PendingDoseService _pendingDoseService = PendingDoseService();
-
-  // ------------------------------------------------------------
-  // Guarda la última versión de alarma que ya fue mostrada.
-  //
-  // key   = pendingDose.id
-  // value = alarmDateTime
-  // ------------------------------------------------------------
 
   final Map<int, String> _shownAlarmDateTimes = {};
 
@@ -40,14 +34,19 @@ class AlarmBootstrapService {
   }
 
   // ============================================================
+  // ACTUALIZAR INMEDIATAMENTE
+  // ============================================================
+
+  Future<void> refresh() async {
+    await _checkDueDoses();
+  }
+
+  // ============================================================
   // COMPROBAR DOSIS
   // ============================================================
 
   Future<void> _checkDueDoses() async {
-    // ----------------------------------------------------------
-    // Evitar que dos comprobaciones se ejecuten simultáneamente.
-    // ----------------------------------------------------------
-
+    // Evitar comprobaciones simultÃ¡neas.
     if (_checkingDoses) {
       return;
     }
@@ -55,17 +54,11 @@ class AlarmBootstrapService {
     _checkingDoses = true;
 
     try {
-      // --------------------------------------------------------
-      // Asegurar que exista la próxima PENDING.
-      //
-      // Esto NO genera MISSED.
-      // --------------------------------------------------------
+      // ========================================================
+      // ASEGURAR QUE EXISTAN LAS DOSIS PENDIENTES
+      // ========================================================
 
       await _pendingDoseService.createDuePendingDoses();
-
-      // --------------------------------------------------------
-      // Obtener TODAS las PENDING.
-      // --------------------------------------------------------
 
       final pendingDoses = await _pendingDoseService.getPendingDoses();
 
@@ -73,16 +66,102 @@ class AlarmBootstrapService {
         return;
       }
 
+      // ========================================================
+      // COMPROBAR CONFIGURACIÃ“N DE NOTIFICACIONES
+      // ========================================================
+
+      final notificationsEnabled = await ParameterService()
+          .areNotificationsEnabled();
+
+      if (!notificationsEnabled) {
+        // Las dosis siguen existiendo y el motor
+        // de tratamientos continÃºa funcionando.
+        //
+        // Simplemente eliminamos las alarmas Android
+        // que pudieran haber quedado programadas.
+        await _alarmService.cancelAllAlarms();
+
+        return;
+      }
+
+      final canScheduleExactAlarms = await _alarmService
+          .hasRequiredPermissions();
+
+      // ========================================================
+      // ORDENAR POR HORA DE ALARMA
+      // ========================================================
+
       pendingDoses.sort((a, b) => a.alarmDateTime.compareTo(b.alarmDateTime));
 
       final now = DateTime.now();
 
-      // --------------------------------------------------------
-      // Procesar las PENDING.
-      // --------------------------------------------------------
+      // ========================================================
+      // MOSTRAR UNA DOSIS VENCIDA Y PROGRAMAR LAS FUTURAS
+      // ========================================================
+      //
+      // Solamente se muestra UNA dosis vencida por comprobaciÃ³n.
+      //
+      // Las demÃ¡s quedan bajo control de
+      // PendingDoseService.
+      //
+
+      var shownOverdueDose = false;
 
       for (final dose in pendingDoses) {
         if (dose.id == null) {
+          continue;
+        }
+
+        if (!dose.alarmDateTime.isAfter(now)) {
+          if (shownOverdueDose) {
+            continue;
+          }
+
+          final detail = await _pendingDoseService.getPendingDoseDetail(
+            dose.id!,
+          );
+
+          if (detail == null) {
+            continue;
+          }
+
+          final notificationData = AlarmService.buildNotificationData(detail);
+
+          final alarmDateTimeKey = dose.alarmDateTime.toIso8601String();
+
+          if (_shownAlarmDateTimes[dose.id!] != alarmDateTimeKey) {
+            await _alarmService.showPendingDoseNotification(
+              notificationId: dose.id!,
+              title: notificationData['title']!,
+              body: notificationData['body']!,
+              payload: dose.id.toString(),
+            );
+
+            _shownAlarmDateTimes[dose.id!] = alarmDateTimeKey;
+          }
+
+          shownOverdueDose = true;
+
+          // No procesar otras dosis vencidas
+          // en esta comprobaciÃ³n.
+          break;
+        }
+      }
+
+      // ========================================================
+      // PROGRAMAR DOSIS FUTURAS
+      // ========================================================
+
+      for (final dose in pendingDoses) {
+        if (dose.id == null) {
+          continue;
+        }
+
+        if (!dose.alarmDateTime.isAfter(now)) {
+          continue;
+        }
+
+        if (!canScheduleExactAlarms) {
           continue;
         }
 
@@ -92,41 +171,7 @@ class AlarmBootstrapService {
           continue;
         }
 
-        final notificationData = _buildNotificationData(detail);
-
-        // ======================================================
-        // DOSIS VENCIDA
-        // ======================================================
-
-        if (!dose.alarmDateTime.isAfter(now)) {
-          final alarmDateTimeKey = dose.alarmDateTime.toIso8601String();
-
-          if (_shownAlarmDateTimes[dose.id!] == alarmDateTimeKey) {
-            continue;
-          }
-
-          await _alarmService.showPendingDoseNotification(
-            notificationId: dose.id!,
-            title: notificationData['title']!,
-            body: notificationData['body']!,
-            payload: dose.id.toString(),
-          );
-
-          _shownAlarmDateTimes[dose.id!] = alarmDateTimeKey;
-
-          // ----------------------------------------------------
-          // Solamente mostrar la primera dosis vencida.
-          //
-          // La siguiente se procesará cuando el usuario resuelva
-          // esta dosis.
-          // ----------------------------------------------------
-
-          continue;
-        }
-
-        // ======================================================
-        // DOSIS FUTURA
-        // ======================================================
+        final notificationData = AlarmService.buildNotificationData(detail);
 
         await _alarmService.scheduleAlarm(
           notificationId: dose.id!,
@@ -142,104 +187,16 @@ class AlarmBootstrapService {
   }
 
   // ============================================================
-  // CONSTRUIR INFORMACIÓN DE NOTIFICACIÓN
-  // ============================================================
-
-  Map<String, String> _buildNotificationData(Map<String, dynamic> detail) {
-    final patientName = detail['patientName']?.toString() ?? 'Paciente';
-
-    final medicineName = detail['medicineName']?.toString() ?? 'Medicamento';
-
-    final doseAmount = detail['doseAmount']?.toString();
-
-    final doseUnit = detail['doseUnit']?.toString();
-
-    final doseNumber = detail['doseNumber']?.toString() ?? '1';
-
-    final totalDoses = detail['totalDoses']?.toString() ?? '1';
-
-    final scheduledDateTime = DateTime.parse(
-      detail['scheduledDateTime'].toString(),
-    );
-
-    final alarmDateTime = DateTime.parse(detail['alarmDateTime'].toString());
-
-    final scheduledText = _formatDateTime(scheduledDateTime);
-
-    final alarmText = _formatDateTime(alarmDateTime);
-
-    // ----------------------------------------------------------
-    // Cantidad
-    // ----------------------------------------------------------
-
-    String doseText = '';
-
-    if (doseAmount != null &&
-        doseAmount.isNotEmpty &&
-        doseUnit != null &&
-        doseUnit.isNotEmpty) {
-      doseText = '$doseAmount $doseUnit';
-    } else if (doseAmount != null && doseAmount.isNotEmpty) {
-      doseText = doseAmount;
-    }
-
-    // ----------------------------------------------------------
-    // Título
-    // ----------------------------------------------------------
-
-    final title = '🐾 $patientName · 💊 $medicineName';
-
-    // ----------------------------------------------------------
-    // Cuerpo
-    // ----------------------------------------------------------
-
-    final bodyLines = <String>['Dosis $doseNumber de $totalDoses'];
-
-    if (doseText.isNotEmpty) {
-      bodyLines.add('Cantidad: $doseText');
-    }
-
-    bodyLines.add('Programada: $scheduledText');
-
-    if (alarmDateTime != scheduledDateTime) {
-      bodyLines.add('Nueva notificación: $alarmText');
-    } else {
-      bodyLines.add('Notificación: $alarmText');
-    }
-
-    return {'title': title, 'body': bodyLines.join('\n')};
-  }
-
-  // ============================================================
-  // FORMATEAR FECHA Y HORA
-  // ============================================================
-
-  String _formatDateTime(DateTime dateTime) {
-    final day = dateTime.day.toString().padLeft(2, '0');
-
-    final month = dateTime.month.toString().padLeft(2, '0');
-
-    final year = dateTime.year.toString();
-
-    final hour = dateTime.hour.toString().padLeft(2, '0');
-
-    final minute = dateTime.minute.toString().padLeft(2, '0');
-
-    return '$day/$month/$year $hour:$minute';
-  }
-
-  // ============================================================
   // REINICIAR ESTADO DEL MONITOR
   // ============================================================
+
+  // Este mÃ©todo NO toca la base de datos.
   //
-  // IMPORTANTE:
+  // Solamente elimina el estado temporal que mantiene
+  // el monitor.
   //
-  // Este método NO toca la base de datos.
-  // Solamente elimina el estado temporal que mantiene el monitor.
-  //
-  // Se utiliza desde resetTestDatabase().
-  //
-  // ============================================================
+  // Se utiliza desde resetTestDatabase()
+  // y desde la configuraciÃ³n de notificaciones.
 
   void resetMonitorState() {
     _shownAlarmDateTimes.clear();

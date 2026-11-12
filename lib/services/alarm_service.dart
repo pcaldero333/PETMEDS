@@ -2,6 +2,7 @@ import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:timezone/data/latest.dart' as tz;
 import 'package:timezone/timezone.dart' as tz;
 
+import 'parameter_service.dart';
 import 'pending_dose_service.dart';
 
 @pragma('vm:entry-point')
@@ -36,8 +37,41 @@ class AlarmService {
       '@mipmap/ic_launcher',
     );
 
-    const initializationSettings = InitializationSettings(
+    final initializationSettings = InitializationSettings(
       android: androidSettings,
+      iOS: DarwinInitializationSettings(
+        requestAlertPermission: false,
+        requestBadgePermission: false,
+        requestSoundPermission: false,
+        notificationCategories: <DarwinNotificationCategory>[
+          DarwinNotificationCategory(
+            'dose_actions',
+            actions: <DarwinNotificationAction>[
+              DarwinNotificationAction.plain(
+                'ADMINISTER',
+                'ADMINISTRAR',
+                options: <DarwinNotificationActionOption>{
+                  DarwinNotificationActionOption.foreground,
+                },
+              ),
+              DarwinNotificationAction.plain(
+                'OMIT',
+                'OMITIR',
+                options: <DarwinNotificationActionOption>{
+                  DarwinNotificationActionOption.foreground,
+                },
+              ),
+              DarwinNotificationAction.plain(
+                'POSTPONE',
+                'POSPONER',
+                options: <DarwinNotificationActionOption>{
+                  DarwinNotificationActionOption.foreground,
+                },
+              ),
+            ],
+          ),
+        ],
+      ),
     );
 
     await _notifications.initialize(
@@ -46,11 +80,19 @@ class AlarmService {
       onDidReceiveBackgroundNotificationResponse: notificationTapBackground,
     );
 
-    // ----------------------------------------------------------
-    // Comprobar si la aplicación fue abierta tocando
-    // una notificación.
-    // ----------------------------------------------------------
+    final parameterService = ParameterService();
+    final permissionsRequested = await parameterService.getParameter(
+      'alarmPermissionsRequested',
+    );
+    final notificationsEnabled = await parameterService
+        .areNotificationsEnabled();
+    if (permissionsRequested != '1' && notificationsEnabled) {
+      await requestPermissions();
+      await parameterService.setParameter('alarmPermissionsRequested', '1');
+    }
 
+    // Si PETMEDS fue abierta tocando una notificación,
+    // procesar la acción correspondiente.
     final launchDetails = await _notifications
         .getNotificationAppLaunchDetails();
 
@@ -64,6 +106,76 @@ class AlarmService {
     }
   }
 
+  /// Solicita permisos del sistema para notificaciones y alarmas exactas.
+  /// Puede llamarse otra vez desde Ajustes si el usuario los concedió allí.
+  Future<bool> requestPermissions() async {
+    final android = _notifications
+        .resolvePlatformSpecificImplementation<
+          AndroidFlutterLocalNotificationsPlugin
+        >();
+
+    if (android != null) {
+      final notificationsGranted = await android
+          .requestNotificationsPermission();
+      final exactAlarmsGranted = await android.requestExactAlarmsPermission();
+      return notificationsGranted != false && exactAlarmsGranted != false;
+    }
+
+    final ios = _notifications
+        .resolvePlatformSpecificImplementation<
+          IOSFlutterLocalNotificationsPlugin
+        >();
+    if (ios != null) {
+      final granted = await ios.requestPermissions(
+        alert: true,
+        badge: true,
+        sound: true,
+      );
+      return granted ?? false;
+    }
+
+    return true;
+  }
+
+  Future<bool> hasRequiredPermissions() async {
+    if (!await canShowNotifications()) {
+      return false;
+    }
+
+    final android = _notifications
+        .resolvePlatformSpecificImplementation<
+          AndroidFlutterLocalNotificationsPlugin
+        >();
+
+    if (android != null) {
+      final exactAlarmsAllowed = await android.canScheduleExactNotifications();
+      return exactAlarmsAllowed == true;
+    }
+
+    return true;
+  }
+
+  Future<bool> canShowNotifications() async {
+    final android = _notifications
+        .resolvePlatformSpecificImplementation<
+          AndroidFlutterLocalNotificationsPlugin
+        >();
+    if (android != null) {
+      return await android.areNotificationsEnabled() == true;
+    }
+
+    final ios = _notifications
+        .resolvePlatformSpecificImplementation<
+          IOSFlutterLocalNotificationsPlugin
+        >();
+    if (ios != null) {
+      final permissions = await ios.checkPermissions();
+      return permissions?.isEnabled == true;
+    }
+
+    return true;
+  }
+
   // ============================================================
   // RESPUESTA A LAS ACCIONES
   // ============================================================
@@ -72,14 +184,10 @@ class AlarmService {
     NotificationResponse response,
   ) async {
     final actionId = response.actionId;
-
     final payload = response.payload;
 
-    // ----------------------------------------------------------
-    // Si el usuario solamente tocó la notificación,
-    // no hay acción que procesar.
-    // ----------------------------------------------------------
-
+    // Tocar simplemente la notificación no modifica
+    // ninguna dosis.
     if (actionId == null || actionId.isEmpty) {
       return;
     }
@@ -94,10 +202,8 @@ class AlarmService {
       return;
     }
 
-    // ----------------------------------------------------------
-    // Cancelar la notificación actual.
-    // ----------------------------------------------------------
-
+    // Cancelar la notificación actual antes de
+    // resolver o modificar la dosis.
     await AlarmService.instance.cancelAlarm(response.id);
 
     final pendingDoseService = PendingDoseService();
@@ -114,7 +220,6 @@ class AlarmService {
       }
 
       await _scheduleNextPendingDose(pendingDoseService);
-
       return;
     }
 
@@ -130,7 +235,6 @@ class AlarmService {
       }
 
       await _scheduleNextPendingDose(pendingDoseService);
-
       return;
     }
 
@@ -139,7 +243,9 @@ class AlarmService {
     // ==========================================================
 
     if (actionId == 'POSTPONE') {
-      const postponeMinutes = 15;
+      final parameterService = ParameterService();
+
+      final postponeMinutes = await parameterService.getPostponeMinutes();
 
       final updated = await pendingDoseService.postponeDose(
         pendingDoseId,
@@ -150,10 +256,10 @@ class AlarmService {
         return;
       }
 
-      // --------------------------------------------------------
       // Obtener nuevamente la misma pending_dose.
-      // --------------------------------------------------------
-
+      //
+      // scheduledDateTime NO cambia.
+      // Solamente cambia alarmDateTime.
       final pendingDose = await pendingDoseService.getPendingDoseByIdForAlarm(
         pendingDoseId,
       );
@@ -168,10 +274,6 @@ class AlarmService {
         return;
       }
 
-      // --------------------------------------------------------
-      // Obtener información completa.
-      // --------------------------------------------------------
-
       final detail = await pendingDoseService.getPendingDoseDetail(
         pendingDoseId,
       );
@@ -180,13 +282,7 @@ class AlarmService {
         return;
       }
 
-      final notificationData = _buildNotificationData(detail);
-
-      // --------------------------------------------------------
-      // Programar nuevamente la MISMA pending_dose.
-      //
-      // scheduledDateTime NO cambia.
-      // --------------------------------------------------------
+      final notificationData = buildNotificationData(detail);
 
       await AlarmService.instance.scheduleAlarm(
         notificationId: pendingDose.id!,
@@ -204,7 +300,7 @@ class AlarmService {
   // CONSTRUIR INFORMACIÓN DE NOTIFICACIÓN
   // ============================================================
 
-  static Map<String, String> _buildNotificationData(
+  static Map<String, String> buildNotificationData(
     Map<String, dynamic> detail,
   ) {
     final patientName = detail['patientName']?.toString() ?? 'Paciente';
@@ -229,10 +325,6 @@ class AlarmService {
 
     final alarmText = _formatDateTime(alarmDateTime);
 
-    // ----------------------------------------------------------
-    // Cantidad
-    // ----------------------------------------------------------
-
     String doseText = '';
 
     if (doseAmount != null &&
@@ -244,15 +336,7 @@ class AlarmService {
       doseText = doseAmount;
     }
 
-    // ----------------------------------------------------------
-    // Título
-    // ----------------------------------------------------------
-
     final title = '🐾 $patientName · 💊 $medicineName';
-
-    // ----------------------------------------------------------
-    // Cuerpo
-    // ----------------------------------------------------------
 
     final bodyLines = <String>['Dosis $doseNumber de $totalDoses'];
 
@@ -299,6 +383,17 @@ class AlarmService {
     required String body,
     String? payload,
   }) async {
+    // Respetar configuración de notificaciones.
+    final enabled = await ParameterService().areNotificationsEnabled();
+
+    if (!enabled) {
+      return;
+    }
+
+    if (!await canShowNotifications()) {
+      return;
+    }
+
     const androidDetails = AndroidNotificationDetails(
       'petmeds_pending_doses',
       'Dosis pendientes PETMEDS',
@@ -324,7 +419,10 @@ class AlarmService {
       ],
     );
 
-    const notificationDetails = NotificationDetails(android: androidDetails);
+    const notificationDetails = NotificationDetails(
+      android: androidDetails,
+      iOS: DarwinNotificationDetails(categoryIdentifier: 'dose_actions'),
+    );
 
     await _notifications.show(
       id: notificationId,
@@ -346,12 +444,20 @@ class AlarmService {
     required String body,
     String? payload,
   }) async {
+    // Respetar configuración de notificaciones.
+    final enabled = await ParameterService().areNotificationsEnabled();
+
+    if (!enabled) {
+      return;
+    }
+
+    if (!await hasRequiredPermissions()) {
+      return;
+    }
+
     final now = DateTime.now();
 
-    // ----------------------------------------------------------
     // Nunca programar una fecha pasada.
-    // ----------------------------------------------------------
-
     if (!alarmDateTime.isAfter(now)) {
       return;
     }
@@ -367,7 +473,7 @@ class AlarmService {
     const androidDetails = AndroidNotificationDetails(
       'petmeds_alarms',
       'Alarmas PETMEDS',
-      channelDescription: 'Alarmas para administrar medicamentos de mascotas',
+      channelDescription: 'Alarmas para administrar medicamentos',
       importance: Importance.max,
       priority: Priority.high,
       playSound: true,
@@ -389,7 +495,10 @@ class AlarmService {
       ],
     );
 
-    const notificationDetails = NotificationDetails(android: androidDetails);
+    const notificationDetails = NotificationDetails(
+      android: androidDetails,
+      iOS: DarwinNotificationDetails(categoryIdentifier: 'dose_actions'),
+    );
 
     await _notifications.zonedSchedule(
       id: notificationId,
@@ -439,10 +548,8 @@ class AlarmService {
 
     final now = DateTime.now();
 
-    // ----------------------------------------------------------
-    // Buscar la primera dosis pendiente que pueda procesarse.
-    // ----------------------------------------------------------
-
+    // Buscar la primera PENDING según su
+    // hora de alarma.
     for (final dose in pendingDoses) {
       if (dose.id == null) {
         continue;
@@ -454,7 +561,7 @@ class AlarmService {
         continue;
       }
 
-      final notificationData = _buildNotificationData(detail);
+      final notificationData = buildNotificationData(detail);
 
       // ========================================================
       // DOSIS YA VENCIDA

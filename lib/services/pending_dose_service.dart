@@ -3,6 +3,7 @@ import 'package:sqflite/sqflite.dart';
 import '../database/database_helper.dart';
 import '../models/pending_dose.dart';
 import '../models/treatment.dart';
+import '../models/dose_history.dart';
 import 'alarm_service.dart';
 import 'alarm_bootstrap_service.dart';
 
@@ -32,7 +33,6 @@ class PendingDoseService {
 
   Future<List<PendingDose>> getDuePendingDoses() async {
     final db = await _dbHelper.database;
-
     final now = DateTime.now().toIso8601String();
 
     final result = await db.query(
@@ -47,12 +47,12 @@ class PendingDoseService {
 
   Future<PendingDose?> getNextPendingDose() async {
     final db = await _dbHelper.database;
-    final now = DateTime.now();
+    final now = DateTime.now().toIso8601String();
 
     final rows = await db.query(
       'pending_doses',
       where: 'status = ? AND alarmDateTime > ?',
-      whereArgs: ['PENDING', now.toIso8601String()],
+      whereArgs: ['PENDING', now],
       orderBy: 'alarmDateTime ASC',
       limit: 1,
     );
@@ -63,29 +63,19 @@ class PendingDoseService {
 
     return PendingDose.fromMap(rows.first);
   }
+
   // ============================================================
   // CREAR DOSIS PENDIENTES
   // ============================================================
   //
-  // REGLA FUNDAMENTAL:
+  // Se mantiene como máximo una dosis PENDING por tratamiento.
   //
-  // El paso del tiempo NUNCA genera MISSED.
+  // Si hay varias dosis vencidas sin resolver, se crea la última
+  // que ya debería haber ocurrido. Al resolverla, los horarios
+  // anteriores sin resolver se guardan como MISSED.
   //
-  // MISSED solamente se genera cuando el usuario decide
-  // administrar u omitir una dosis posterior y existen ticks
-  // anteriores que todavía no habían sido resueltos.
-  //
-  // IMPORTANTE:
-  //
-  // Si han quedado muchas dosis atrasadas, NO se crean todas
-  // como PENDING una detrás de otra.
-  //
-  // Se crea solamente la última dosis programada que ya debería
-  // haber ocurrido.
-  //
-  // Cuando el usuario la resuelve, _resolveDose() detectará
-  // automáticamente los ticks anteriores y los registrará
-  // como MISSED.
+  // Los horarios se calculan desde treatment.startDate, usando
+  // frequencyHours. El paso del tiempo por sí solo no crea MISSED.
   //
   // ============================================================
 
@@ -93,169 +83,169 @@ class PendingDoseService {
     final db = await _dbHelper.database;
     final now = DateTime.now();
 
-    final treatmentRows = await db.query(
-      'treatments',
-      where: 'active = ?',
-      whereArgs: [1],
-    );
-
-    final createdDoses = <PendingDose>[];
-
-    for (final row in treatmentRows) {
-      final treatment = Treatment.fromMap(row);
-
-      if (treatment.id == null) continue;
-      if (treatment.frequencyHours <= 0) continue;
-
-      // ------------------------------------------------------------
-      // Si ya existe una dosis PENDING para este tratamiento,
-      // no creamos otra.
-      // ------------------------------------------------------------
-      final existingPending = await db.query(
-        'pending_doses',
-        where: 'treatmentId = ? AND status = ?',
-        whereArgs: [treatment.id, 'PENDING'],
-        limit: 1,
+    return db.transaction<List<PendingDose>>((txn) async {
+      final treatmentRows = await txn.query(
+        'treatments',
+        where: 'active = ?',
+        whereArgs: [1],
       );
 
-      if (existingPending.isNotEmpty) continue;
+      final createdDoses = <PendingDose>[];
 
-      // ------------------------------------------------------------
-      // Buscar la última dosis que ya tuvo una resolución:
-      // ADMINISTERED u OMITTED.
-      //
-      // IMPORTANTE:
-      // Para calcular el siguiente tick utilizamos
-      // scheduledDateTime, NO administeredDateTime.
-      // ------------------------------------------------------------
-      final lastActionResult = await db.query(
-        'dose_history',
-        where: 'treatmentId = ? AND status IN (?, ?)',
-        whereArgs: [treatment.id, 'ADMINISTERED', 'OMITTED'],
-        orderBy: 'id DESC',
-        limit: 1,
-      );
+      for (final row in treatmentRows) {
+        final treatment = Treatment.fromMap(row);
 
-      DateTime nextScheduledDateTime;
-
-      if (lastActionResult.isNotEmpty) {
-        final scheduledText = lastActionResult.first['scheduledDateTime']
-            ?.toString();
-
-        if (scheduledText == null || scheduledText.isEmpty) {
-          nextScheduledDateTime = treatment.startDate;
-        } else {
-          final lastScheduledDateTime = DateTime.parse(scheduledText);
-
-          nextScheduledDateTime = lastScheduledDateTime.add(
-            Duration(hours: treatment.frequencyHours),
-          );
-        }
-      } else {
-        // No existe ninguna dosis resuelta todavía.
-        // La primera dosis corresponde al inicio del tratamiento.
-        nextScheduledDateTime = treatment.startDate;
-      }
-
-      // Nunca permitir una dosis anterior al inicio del tratamiento.
-      if (nextScheduledDateTime.isBefore(treatment.startDate)) {
-        nextScheduledDateTime = treatment.startDate;
-      }
-
-      // ------------------------------------------------------------
-      // AVANZAR HASTA EL ÚLTIMO TICK QUE YA HAYA LLEGADO.
-      //
-      // Ejemplo:
-      //
-      // última resuelta = 15:40
-      // frecuencia      = 1 hora
-      // ahora            = 18:10
-      //
-      // 16:40 -> vencida
-      // 17:40 -> vencida
-      // 18:40 -> futura
-      //
-      // Por lo tanto el PENDING será solamente 17:40.
-      // ------------------------------------------------------------
-      while (true) {
-        final followingTick = nextScheduledDateTime.add(
-          Duration(hours: treatment.frequencyHours),
-        );
-
-        if (followingTick.isAfter(treatment.endDate)) {
-          break;
-        }
-
-        if (followingTick.isAfter(now)) {
-          break;
-        }
-
-        nextScheduledDateTime = followingTick;
-      }
-
-      // ------------------------------------------------------------
-      // Si el último tick calculado está después del final,
-      // el tratamiento ya terminó.
-      // ------------------------------------------------------------
-      if (nextScheduledDateTime.isAfter(treatment.endDate)) {
-        await _finishTreatment(db, treatment.id!);
-        continue;
-      }
-
-      // ------------------------------------------------------------
-      // Verificar que este tick todavía no esté registrado
-      // en dose_history.
-      // ------------------------------------------------------------
-      final alreadyProcessed = await db.query(
-        'dose_history',
-        where: 'treatmentId = ? AND scheduledDateTime = ?',
-        whereArgs: [treatment.id, nextScheduledDateTime.toIso8601String()],
-        limit: 1,
-      );
-
-      if (alreadyProcessed.isNotEmpty) {
-        // Este tick ya fue resuelto. Avanzamos al siguiente.
-        nextScheduledDateTime = nextScheduledDateTime.add(
-          Duration(hours: treatment.frequencyHours),
-        );
-
-        if (nextScheduledDateTime.isAfter(treatment.endDate)) {
-          await _finishTreatment(db, treatment.id!);
+        if (treatment.id == null || treatment.frequencyHours <= 0) {
           continue;
         }
+
+        if (treatment.endDate.isBefore(treatment.startDate)) {
+          await _finishTreatment(txn, treatment.id!);
+          continue;
+        }
+
+        final existingPending = await txn.query(
+          'pending_doses',
+          where: 'treatmentId = ? AND status = ?',
+          whereArgs: [treatment.id, 'PENDING'],
+          limit: 1,
+        );
+
+        final historyRows = await txn.query(
+          'dose_history',
+          columns: ['scheduledDateTime'],
+          where: 'treatmentId = ?',
+          whereArgs: [treatment.id],
+        );
+
+        final processedScheduleTimes = historyRows
+            .map((historyRow) => historyRow['scheduledDateTime']?.toString())
+            .whereType<String>()
+            .toSet();
+
+        DateTime? latestUnprocessedDueTick;
+        DateTime? firstUnprocessedFutureTick;
+
+        var tick = treatment.startDate;
+
+        while (!tick.isAfter(treatment.endDate)) {
+          final tickKey = tick.toIso8601String();
+
+          if (!processedScheduleTimes.contains(tickKey)) {
+            if (!tick.isAfter(now)) {
+              latestUnprocessedDueTick = tick;
+            } else {
+              firstUnprocessedFutureTick ??= tick;
+            }
+          }
+
+          tick = tick.add(Duration(hours: treatment.frequencyHours));
+        }
+
+        final scheduledDateTime =
+            latestUnprocessedDueTick ?? firstUnprocessedFutureTick;
+
+        if (scheduledDateTime == null) {
+          await txn.delete(
+            'pending_doses',
+            where: 'treatmentId = ? AND status = ?',
+            whereArgs: [treatment.id, 'PENDING'],
+          );
+          await _finishTreatment(txn, treatment.id!);
+          continue;
+        }
+
+        // Si el usuario pospuso una dosis, respetar esa hora de alarma.
+        // En los demás casos, una pendiente antigua no debe provocar que
+        // PETMEDS presente cada horario vencido uno por uno.
+        if (existingPending.isNotEmpty) {
+          final pending = PendingDose.fromMap(existingPending.first);
+
+          if (pending.alarmDateTime.isAfter(now)) {
+            continue;
+          }
+
+          if (latestUnprocessedDueTick != null &&
+              pending.scheduledDateTime.isBefore(latestUnprocessedDueTick)) {
+            var missedTick = treatment.startDate;
+
+            while (missedTick.isBefore(latestUnprocessedDueTick)) {
+              if (!processedScheduleTimes.contains(
+                missedTick.toIso8601String(),
+              )) {
+                await _insertMissedIfNeeded(txn, treatment, missedTick);
+              }
+
+              missedTick = missedTick.add(
+                Duration(hours: treatment.frequencyHours),
+              );
+            }
+
+            await txn.update(
+              'pending_doses',
+              {
+                'scheduledDateTime': latestUnprocessedDueTick.toIso8601String(),
+                'alarmDateTime': now.toIso8601String(),
+              },
+              where: 'id = ? AND status = ?',
+              whereArgs: [pending.id, 'PENDING'],
+            );
+
+            createdDoses.add(
+              pending.copyWith(
+                scheduledDateTime: latestUnprocessedDueTick,
+                alarmDateTime: now,
+              ),
+            );
+          }
+
+          continue;
+        }
+
+        // Registrar los horarios anteriores al más reciente como MISSED.
+        // La dosis más reciente vencida queda disponible para el usuario.
+        if (latestUnprocessedDueTick != null) {
+          var missedTick = treatment.startDate;
+
+          while (missedTick.isBefore(latestUnprocessedDueTick)) {
+            if (!processedScheduleTimes.contains(
+              missedTick.toIso8601String(),
+            )) {
+              await _insertMissedIfNeeded(txn, treatment, missedTick);
+            }
+
+            missedTick = missedTick.add(
+              Duration(hours: treatment.frequencyHours),
+            );
+          }
+        }
+
+        final alarmDateTime = scheduledDateTime.isAfter(now)
+            ? scheduledDateTime
+            : now;
+
+        final id = await txn.insert('pending_doses', {
+          'treatmentId': treatment.id,
+          'patientId': treatment.patientId,
+          'scheduledDateTime': scheduledDateTime.toIso8601String(),
+          'alarmDateTime': alarmDateTime.toIso8601String(),
+          'status': 'PENDING',
+        });
+
+        createdDoses.add(
+          PendingDose(
+            id: id,
+            treatmentId: treatment.id!,
+            patientId: treatment.patientId,
+            scheduledDateTime: scheduledDateTime,
+            alarmDateTime: alarmDateTime,
+            status: 'PENDING',
+          ),
+        );
       }
 
-      // ------------------------------------------------------------
-      // Crear UNA SOLA dosis PENDING.
-      //
-      // Si ya llegó la hora, alarmDateTime = now.
-      // Si todavía es futura, alarmDateTime = scheduledDateTime.
-      // ------------------------------------------------------------
-      final alarmDateTime = nextScheduledDateTime.isAfter(now)
-          ? nextScheduledDateTime
-          : now;
-
-      final id = await db.insert('pending_doses', {
-        'treatmentId': treatment.id,
-        'patientId': treatment.patientId,
-        'scheduledDateTime': nextScheduledDateTime.toIso8601String(),
-        'alarmDateTime': alarmDateTime.toIso8601String(),
-        'status': 'PENDING',
-      });
-
-      createdDoses.add(
-        PendingDose(
-          id: id,
-          treatmentId: treatment.id!,
-          patientId: treatment.patientId,
-          scheduledDateTime: nextScheduledDateTime,
-          alarmDateTime: alarmDateTime,
-          status: 'PENDING',
-        ),
-      );
-    }
-
-    return createdDoses;
+      return createdDoses;
+    });
   }
 
   // ============================================================
@@ -299,58 +289,82 @@ class PendingDoseService {
   }) async {
     final db = await _dbHelper.database;
 
-    final treatment = await _getTreatment(treatmentId);
+    return db.transaction<int>((txn) async {
+      final treatmentRows = await txn.query(
+        'treatments',
+        where: 'id = ?',
+        whereArgs: [treatmentId],
+        limit: 1,
+      );
 
-    if (treatment == null) {
-      return 0;
-    }
+      if (treatmentRows.isEmpty) {
+        return 0;
+      }
 
-    if (scheduledDateTime.isAfter(treatment.endDate)) {
-      await _finishTreatment(db, treatmentId);
-      return 0;
-    }
+      final treatment = Treatment.fromMap(treatmentRows.first);
 
-    final existing = await db.query(
-      'pending_doses',
-      where: 'treatmentId = ? AND status = ?',
-      whereArgs: [treatmentId, 'PENDING'],
-      limit: 1,
-    );
+      if (treatment.id == null || treatment.frequencyHours <= 0) {
+        return 0;
+      }
 
-    if (existing.isNotEmpty) {
-      return existing.first['id'] as int;
-    }
+      if (!_isValidScheduledTick(treatment, scheduledDateTime)) {
+        if (scheduledDateTime.isAfter(treatment.endDate)) {
+          await _finishTreatment(txn, treatmentId);
+        }
+        return 0;
+      }
 
-    final now = DateTime.now();
+      final existingPending = await txn.query(
+        'pending_doses',
+        where: 'treatmentId = ? AND status = ?',
+        whereArgs: [treatmentId, 'PENDING'],
+        limit: 1,
+      );
 
-    final alarmDateTime = scheduledDateTime.isAfter(now)
-        ? scheduledDateTime
-        : now;
+      if (existingPending.isNotEmpty) {
+        return existingPending.first['id'] as int;
+      }
 
-    final pendingDose = PendingDose(
-      treatmentId: treatmentId,
-      patientId: patientId,
-      scheduledDateTime: scheduledDateTime,
-      alarmDateTime: alarmDateTime,
-      status: 'PENDING',
-    );
+      final existingHistory = await txn.query(
+        'dose_history',
+        where: 'treatmentId = ? AND scheduledDateTime = ?',
+        whereArgs: [treatmentId, scheduledDateTime.toIso8601String()],
+        limit: 1,
+      );
 
-    return db.insert('pending_doses', pendingDose.toMap());
+      if (existingHistory.isNotEmpty) {
+        return 0;
+      }
+
+      final now = DateTime.now();
+      final alarmDateTime = scheduledDateTime.isAfter(now)
+          ? scheduledDateTime
+          : now;
+
+      final pendingDose = PendingDose(
+        treatmentId: treatmentId,
+        patientId: patientId,
+        scheduledDateTime: scheduledDateTime,
+        alarmDateTime: alarmDateTime,
+        status: 'PENDING',
+      );
+
+      return txn.insert('pending_doses', pendingDose.toMap());
+    });
   }
 
   // ============================================================
   // POSPONER DOSIS
   // ============================================================
   //
-  // NO modifica scheduledDateTime.
-  // NO crea historial.
-  // NO genera MISSED.
+  // No modifica scheduledDateTime.
+  // No crea historial.
+  // No genera MISSED.
   //
   // ============================================================
 
   Future<int> postponeDose(int pendingDoseId, int postponeMinutes) async {
     final db = await _dbHelper.database;
-
     final pendingDose = await _getPendingDoseById(pendingDoseId);
 
     if (pendingDose == null) {
@@ -392,18 +406,16 @@ class PendingDoseService {
   // RESOLVER DOSIS
   // ============================================================
   //
-  // MISSED solamente puede ser generado aquí.
+  // Solo se marcan MISSED los horarios anteriores a la dosis que
+  // el usuario está resolviendo. Los horarios posteriores nunca
+  // se marcan MISSED al resolver una dosis anterior.
   //
   // ============================================================
 
   Future<int> _resolveDose(int pendingDoseId, String userStatus) async {
     final db = await _dbHelper.database;
 
-    return db.transaction<int>((txn) async {
-      // ========================================================
-      // 1. OBTENER PENDING ACTUAL
-      // ========================================================
-
+    final result = await db.transaction<int>((txn) async {
       final pendingResult = await txn.query(
         'pending_doses',
         where: 'id = ? AND status = ?',
@@ -416,10 +428,6 @@ class PendingDoseService {
       }
 
       final pendingDose = PendingDose.fromMap(pendingResult.first);
-
-      // ========================================================
-      // 2. OBTENER TRATAMIENTO
-      // ========================================================
 
       final treatmentResult = await txn.query(
         'treatments',
@@ -434,21 +442,9 @@ class PendingDoseService {
 
       final treatment = Treatment.fromMap(treatmentResult.first);
 
-      if (treatment.id == null) {
+      if (treatment.id == null || treatment.frequencyHours <= 0) {
         return 0;
       }
-
-      // ========================================================
-      // 3. VALIDAR FRECUENCIA
-      // ========================================================
-
-      if (treatment.frequencyHours <= 0) {
-        return 0;
-      }
-
-      // ========================================================
-      // 4. VALIDAR END DATE
-      // ========================================================
 
       if (pendingDose.scheduledDateTime.isAfter(treatment.endDate)) {
         await txn.delete(
@@ -458,43 +454,56 @@ class PendingDoseService {
         );
 
         await _finishTreatment(txn, treatment.id!);
+        return 0;
+      }
 
+      if (!_isValidScheduledTick(treatment, pendingDose.scheduledDateTime)) {
         return 0;
       }
 
       final now = DateTime.now();
 
-      // ========================================================
-      // 4A. PROTECCIÓN CONTRA DOSIS FUTURAS
-      //
-      // Nunca permitir administrar u omitir una dosis cuya
-      // alarma todavía no ha llegado.
-      //
-      // Esto protege incluso si _resolveDose() es llamado
-      // directamente desde otro lugar de la aplicación.
-      // ========================================================
-
+      // La alarma puede haberse pospuesto. La dosis no se resuelve
+      // hasta que llegue alarmDateTime.
       if (pendingDose.alarmDateTime.isAfter(now)) {
         return 0;
       }
 
-      // ========================================================
-      // 5. BUSCAR ÚLTIMA ACCIÓN REAL
-      //
-      // MISSED NO CUENTA.
-      // ========================================================
-
-      final lastActionResult = await txn.query(
+      // Evita crear una segunda entrada de historial para el mismo
+      // horario si existe una dosis pendiente duplicada antigua.
+      final existingHistory = await txn.query(
         'dose_history',
-        where: 'treatmentId = ? AND status IN (?, ?)',
-        whereArgs: [treatment.id, 'ADMINISTERED', 'OMITTED'],
-        orderBy: 'id DESC',
+        where: 'treatmentId = ? AND scheduledDateTime = ?',
+        whereArgs: [
+          treatment.id,
+          pendingDose.scheduledDateTime.toIso8601String(),
+        ],
         limit: 1,
       );
 
-      // ========================================================
-      // 6. ESTABLECER CURSOR
-      // ========================================================
+      if (existingHistory.isNotEmpty) {
+        await txn.delete(
+          'pending_doses',
+          where: 'id = ?',
+          whereArgs: [pendingDoseId],
+        );
+        return 0;
+      }
+
+      // Busca la última acción real anterior a esta dosis.
+      // Las entradas MISSED no cambian este cursor.
+      final lastActionResult = await txn.query(
+        'dose_history',
+        where: 'treatmentId = ? AND status IN (?, ?) AND scheduledDateTime < ?',
+        whereArgs: [
+          treatment.id,
+          'ADMINISTERED',
+          'OMITTED',
+          pendingDose.scheduledDateTime.toIso8601String(),
+        ],
+        orderBy: 'scheduledDateTime DESC, id DESC',
+        limit: 1,
+      );
 
       DateTime timelineCursor;
 
@@ -515,25 +524,9 @@ class PendingDoseService {
         );
       }
 
-      // ========================================================
-      // 7. GENERAR MISSED ANTERIORES
-      //
-      // Aquí está la recuperación de las dosis que quedaron
-      // atrás.
-      //
-      // Ejemplo:
-      //
-      // 15:15 ADMINISTRADA
-      // 16:15 MISSED
-      // 17:15 MISSED
-      // 18:15 MISSED
-      // 19:15 ADMINISTRADA
-      //
-      // ========================================================
-
-      DateTime tick = timelineCursor.add(
-        Duration(hours: treatment.frequencyHours),
-      );
+      // Registra como MISSED únicamente los horarios entre la última
+      // acción y la dosis que el usuario está resolviendo.
+      var tick = timelineCursor.add(Duration(hours: treatment.frequencyHours));
 
       while (tick.isBefore(pendingDose.scheduledDateTime)) {
         if (tick.isAfter(treatment.endDate)) {
@@ -541,13 +534,8 @@ class PendingDoseService {
         }
 
         await _insertMissedIfNeeded(txn, treatment, tick);
-
         tick = tick.add(Duration(hours: treatment.frequencyHours));
       }
-
-      // ========================================================
-      // 8. REGISTRAR ACCIÓN DEL USUARIO
-      // ========================================================
 
       await txn.insert('dose_history', {
         'patientId': pendingDose.patientId,
@@ -559,31 +547,30 @@ class PendingDoseService {
         'status': userStatus,
       });
 
-      // ========================================================
-      // 9. ELIMINAR PENDING ACTUAL
-      // ========================================================
-
       await txn.delete(
         'pending_doses',
         where: 'id = ?',
         whereArgs: [pendingDoseId],
       );
 
-      // ========================================================
-      // 10. DETERMINAR SIGUIENTE DOSIS
-      // ========================================================
-
+      // La siguiente dosis siempre conserva el horario anclado:
+      // dosis actual + frecuencia. Si está vencida, se presenta ahora,
+      // pero scheduledDateTime no se cambia.
       var nextScheduledDateTime = pendingDose.scheduledDateTime.add(
         Duration(hours: treatment.frequencyHours),
       );
 
-      while (!nextScheduledDateTime.isAfter(now)) {
-        if (nextScheduledDateTime.isAfter(treatment.endDate)) {
-          await _finishTreatment(txn, treatment.id!);
-          return 1;
-        }
+      while (!nextScheduledDateTime.isAfter(treatment.endDate)) {
+        final alreadyProcessed = await txn.query(
+          'dose_history',
+          where: 'treatmentId = ? AND scheduledDateTime = ?',
+          whereArgs: [treatment.id, nextScheduledDateTime.toIso8601String()],
+          limit: 1,
+        );
 
-        await _insertMissedIfNeeded(txn, treatment, nextScheduledDateTime);
+        if (alreadyProcessed.isEmpty) {
+          break;
+        }
 
         nextScheduledDateTime = nextScheduledDateTime.add(
           Duration(hours: treatment.frequencyHours),
@@ -595,16 +582,40 @@ class PendingDoseService {
         return 1;
       }
 
+      // Protección adicional ante pendientes duplicadas que pudieran
+      // existir desde antes de esta versión.
+      final anotherPending = await txn.query(
+        'pending_doses',
+        where: 'treatmentId = ? AND status = ?',
+        whereArgs: [treatment.id, 'PENDING'],
+        orderBy: 'scheduledDateTime ASC',
+        limit: 1,
+      );
+
+      if (anotherPending.isNotEmpty) {
+        return 1;
+      }
+
+      final nextAlarmDateTime = nextScheduledDateTime.isAfter(now)
+          ? nextScheduledDateTime
+          : now;
+
       await txn.insert('pending_doses', {
         'treatmentId': treatment.id,
         'patientId': treatment.patientId,
         'scheduledDateTime': nextScheduledDateTime.toIso8601String(),
-        'alarmDateTime': nextScheduledDateTime.toIso8601String(),
+        'alarmDateTime': nextAlarmDateTime.toIso8601String(),
         'status': 'PENDING',
       });
 
       return 1;
     });
+
+    if (result > 0) {
+      await createDuePendingDoses();
+    }
+
+    return result;
   }
 
   // ============================================================
@@ -616,11 +627,11 @@ class PendingDoseService {
     Treatment treatment,
     DateTime scheduledDateTime,
   ) async {
-    if (scheduledDateTime.isAfter(treatment.endDate)) {
+    if (treatment.id == null || treatment.frequencyHours <= 0) {
       return;
     }
 
-    if (scheduledDateTime.isBefore(treatment.startDate)) {
+    if (!_isValidScheduledTick(treatment, scheduledDateTime)) {
       return;
     }
 
@@ -665,37 +676,49 @@ class PendingDoseService {
 
       final treatment = Treatment.fromMap(treatmentRows.first);
 
-      if (treatment.id == null) {
+      if (treatment.id == null || treatment.frequencyHours <= 0) {
         return null;
       }
 
-      if (treatment.frequencyHours <= 0) {
-        return null;
-      }
-
-      final nextDateTime = previousDose.scheduledDateTime.add(
-        Duration(hours: treatment.frequencyHours),
-      );
-
-      if (nextDateTime.isAfter(treatment.endDate)) {
-        await _finishTreatment(txn, treatment.id!);
-
-        return null;
-      }
-
-      final existing = await txn.query(
+      final existingPending = await txn.query(
         'pending_doses',
         where: 'treatmentId = ? AND status = ?',
         whereArgs: [treatment.id, 'PENDING'],
+        orderBy: 'scheduledDateTime ASC',
         limit: 1,
       );
 
-      if (existing.isNotEmpty) {
-        return PendingDose.fromMap(existing.first);
+      if (existingPending.isNotEmpty) {
+        return PendingDose.fromMap(existingPending.first);
+      }
+
+      var nextDateTime = previousDose.scheduledDateTime.add(
+        Duration(hours: treatment.frequencyHours),
+      );
+
+      while (!nextDateTime.isAfter(treatment.endDate)) {
+        final existingHistory = await txn.query(
+          'dose_history',
+          where: 'treatmentId = ? AND scheduledDateTime = ?',
+          whereArgs: [treatment.id, nextDateTime.toIso8601String()],
+          limit: 1,
+        );
+
+        if (existingHistory.isEmpty) {
+          break;
+        }
+
+        nextDateTime = nextDateTime.add(
+          Duration(hours: treatment.frequencyHours),
+        );
+      }
+
+      if (nextDateTime.isAfter(treatment.endDate)) {
+        await _finishTreatment(txn, treatment.id!);
+        return null;
       }
 
       final now = DateTime.now();
-
       final alarmDateTime = nextDateTime.isAfter(now) ? nextDateTime : now;
 
       final id = await txn.insert('pending_doses', {
@@ -828,6 +851,46 @@ class PendingDoseService {
   }
 
   // ============================================================
+  // OBTENER HISTORIAL DE DOSIS
+  // ============================================================
+
+  Future<List<DoseHistory>> getDoseHistory() async {
+    final db = await _dbHelper.database;
+
+    final result = await db.rawQuery('''
+      SELECT
+        dh.id,
+        dh.patientId,
+        dh.treatmentId,
+        dh.scheduledDateTime,
+        dh.administeredDateTime,
+        dh.status,
+
+        p.name AS patientName,
+
+        m.name AS medicineName,
+
+        t.doseAmount,
+        t.doseUnit
+
+      FROM dose_history dh
+
+      INNER JOIN patients p
+        ON p.id = dh.patientId
+
+      INNER JOIN treatments t
+        ON t.id = dh.treatmentId
+
+      INNER JOIN medicines m
+        ON m.id = t.medicineId
+
+      ORDER BY dh.scheduledDateTime DESC
+    ''');
+
+    return result.map((map) => DoseHistory.fromMap(map)).toList();
+  }
+
+  // ============================================================
   // OBTENER PENDING DOSE POR ID
   // ============================================================
 
@@ -870,23 +933,43 @@ class PendingDoseService {
   }
 
   // ============================================================
+  // VALIDAR QUE LA FECHA PERTENEZCA AL HORARIO DEL TRATAMIENTO
+  // ============================================================
+
+  bool _isValidScheduledTick(Treatment treatment, DateTime scheduledDateTime) {
+    if (treatment.frequencyHours <= 0) {
+      return false;
+    }
+
+    if (scheduledDateTime.isBefore(treatment.startDate) ||
+        scheduledDateTime.isAfter(treatment.endDate)) {
+      return false;
+    }
+
+    final intervalMicroseconds = Duration(
+      hours: treatment.frequencyHours,
+    ).inMicroseconds;
+    final elapsedMicroseconds = scheduledDateTime
+        .difference(treatment.startDate)
+        .inMicroseconds;
+
+    if (intervalMicroseconds <= 0 || elapsedMicroseconds < 0) {
+      return false;
+    }
+
+    return elapsedMicroseconds % intervalMicroseconds == 0;
+  }
+
+  // ============================================================
   // FINALIZAR TRATAMIENTO
   // ============================================================
 
   Future<void> _finishTreatment(DatabaseExecutor db, int treatmentId) async {
-    // ----------------------------------------------------------
-    // Eliminar pendientes residuales.
-    // ----------------------------------------------------------
-
     await db.delete(
       'pending_doses',
       where: 'treatmentId = ?',
       whereArgs: [treatmentId],
     );
-
-    // ----------------------------------------------------------
-    // Marcar tratamiento como inactivo.
-    // ----------------------------------------------------------
 
     await db.update(
       'treatments',
@@ -906,7 +989,7 @@ class PendingDoseService {
   //   2. dose_history
   //   3. treatments
   //
-  // NO elimina:
+  // No elimina:
   //
   //   - patients
   //   - medicines
@@ -916,25 +999,13 @@ class PendingDoseService {
   Future<void> resetTestDatabase() async {
     final db = await _dbHelper.database;
 
-    // ----------------------------------------------------------
-    // 1. CANCELAR TODAS LAS ALARMAS
-    // ----------------------------------------------------------
-
     await AlarmService.instance.cancelAllAlarms();
-
-    // ----------------------------------------------------------
-    // 2. LIMPIAR LAS TRES TABLAS EN UNA TRANSACCIÓN
-    // ----------------------------------------------------------
 
     await db.transaction((txn) async {
       await txn.delete('pending_doses');
       await txn.delete('dose_history');
       await txn.delete('treatments');
     });
-
-    // ----------------------------------------------------------
-    // 3. LIMPIAR EL ESTADO DEL MONITOR
-    // ----------------------------------------------------------
 
     AlarmBootstrapService.instance.resetMonitorState();
   }
